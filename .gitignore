@@ -1,0 +1,8 @@
+.DS_Store
+/Data
+/Outcomes
+.DS_Store
+*.Rapp.history
+*.Rdata
+*.Rhistory
+/Documents
