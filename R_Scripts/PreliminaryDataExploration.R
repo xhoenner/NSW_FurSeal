@@ -4,7 +4,7 @@ library(Hmisc); library(mapdata); library(DAAG); library(dplyr); library(foieGra
 wgs.84 <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"; mollweide <- "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
 
 
-## Read all datasets, both location and CTD, along with metadata and bathymetry
+## Read location and CTD datasets, along with metadata, bathymetry, and coastline
 	## Primary datasets
 	ct91.loc <- mdb.get('~/Work/WIP/NSW_FurSeal/Data/ct91.mdb', tables = 'diag'); ct91.ctd <- mdb.get('~/Work/WIP/NSW_FurSeal/Data/ct91.mdb', tables = 'ctd')
 	ct101.loc <- mdb.get('~/Work/WIP/NSW_FurSeal/Data/ct101.mdb', tables = 'diag'); ct101.ctd <- mdb.get('~/Work/WIP/NSW_FurSeal/Data/ct101.mdb', tables = 'ctd')
@@ -13,13 +13,230 @@ wgs.84 <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"; mol
 	metadata$mass <- ifelse(is.na(metadata$estimated_mass), metadata$actual_mass, metadata$estimated_mass)
 	
 	## Ancillary datasets
-	bathymetry <- nc_open("~/Work/Resources/GIS/Bathymetry/GEBCO_2020/gebco_2020_n25.0_s-80.0_w70.0_e179.9.nc");
-	
+	bathymetry <- nc_open("~/Work/Resources/GIS/Bathymetry/GEBCO_2020/gebco_2020_n25.0_s-80.0_w70.0_e179.9.nc");	
 	coast <- sf::st_read('~/Work/Resources/GIS/OSM_LandPolygonsComplete/land_polygons.shp'); coast_wgs84 <- st_transform(coast, crs = wgs.84); 
 	mapBase <- maps::map("worldHires", fill = T, plot = F)
 	
+	## Primary datasets preprocessing
+	loc <- rbind(ct91.loc, ct101.loc, ct110.loc); ctd <- rbind(ct91.ctd, ct101.ctd, ct110.ctd); # ctd.ssm <- rbind(ct91.ctd.ssm, ct101.ctd.ssm, ct110.ctd.ssm)
+	loc <- loc[which(loc$LON > 139 & loc$LON < 163 & loc$LAT > -43 & loc$LAT < -30),]; ctd <- ctd[which(ctd$LON > 139 & ctd$LON < 163 & ctd$LAT > -43 & ctd$LAT < -30),]
+	xr <- range(ctd$LON, na.rm = T); yr <- range(ctd$LAT, na.rm = T); expansion <- c(-2, 2);
+	loc$ref <- as.character(loc$ref); ctd$ref <- as.character(ctd$ref); # ctd.ssm$ref <- as.character(ctd.ssm$ref)
+	loc$D.DATE <- strptime(as.character(loc$D.DATE), '(%m/%d/%y %H:%M:%S)', tz = 'UTC'); ctd$END.DATE <- strptime(as.character(ctd$END.DATE), '(%m/%d/%y %H:%M:%S)', tz = 'UTC'); 
+	loc$sattag_program <- sapply(strsplit(loc$ref, '-'), '[[', 1); ctd$sattag_program <- sapply(strsplit(ctd$ref, '-'), '[[', 1); # ctd.ssm$sattag_program <- sapply(strsplit(ctd.ssm$ref, '-'), '[[', 1); 
+	sattag_programs <- unique(loc$sattag_program)
+	ctd.all <- ctd[which(ctd$TEMP.DBAR != '' & !is.na(ctd$END.DATE)),]; id <- unique(ctd.all$ref); 
 	
+
+## Process Argos tracks through foieGras
+	## 6 hourly
+	for (i in 1:length(id)){
+		dat <- loc[which(loc$ref == id[i]), c('ref', 'D.DATE', 'LQ', 'LON', 'LAT')] ## Select an individual
+		colnames(dat) <- c('id', 'date', 'lc', 'lon', 'lat')
+		dat$date <- as.POSIXct(dat$date)
+		dat$lc <- as.character(dat$lc); dat$lc[which(dat$lc == '-1')] <- 'A'; dat$lc[which(dat$lc == '-2')] <- 'B'; dat$lc[which(dat$lc == '-9')] <- 'Z'
+		dat$lon <- as.numeric(dat$lon); dat$lat <- as.numeric(dat$lat); dat$id <- as.character(dat$id);
+		dat <- dat[which(!is.na(dat$date)),];
+		
+		dat_ssm_rw <- fit_ssm(dat, model = 'crw', time.step = 6)
+		# plot(dat_ssm_rw$ssm[[1]])
+		coords <- st_coordinates(st_transform(dat_ssm_rw$ssm[[1]]$predicted, 4326));
+		coords.df <- data.frame(dat_ssm_rw$ssm[[1]]$predicted$date, coords); colnames(coords.df)[1] <- 'date'
 	
+		SSMproc <- data.frame(cbind(dat_ssm_rw$ssm[[1]]$predicted[, c('id', 'date')], coords))
+		if (i == 1) {SSMproc.all <- SSMproc} else {SSMproc.all <- rbind(SSMproc.all, SSMproc)}
+	}
+	SSMproc.all$sattag_program <-  sapply(strsplit(as.character(SSMproc.all$id), '-'), '[[', 1); 
+
+	png(file = '~/Work/WIP/NSW_FurSeal/Outcomes/PreliminaryMaps_ArgosVsFoieGras2022locations_6hrs.png', width = 1920, height = 1920, units = "px", res=92, bg = "white");
+		par(mfrow = c(3, 2), mar = c(4, 4, 1.5, .5))
+		for (i in 1:length(sattag_programs)){
+			loc.sel <- loc[which(loc$sattag_program == sattag_programs[i]),]; SSMproc.all.sel <- SSMproc.all[which(SSMproc.all$sattag_program == sattag_programs[i]),]
+	
+			## Left
+				maps::map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - Argos', sep = ''))
+				for (j in 1:length(unique(loc.sel$ref))){
+					lines(loc.sel[which(loc.sel$ref == unique(loc.sel$ref)[j]), c('LON', 'LAT')], col = j)
+				}
+			## Right			
+				maps::map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - FoieGras', sep = ''))
+				for (j in 1:length(unique(SSMproc.all.sel$id))){
+					lines(SSMproc.all.sel[which(SSMproc.all.sel$id == unique(SSMproc.all.sel$id)[j]), c('X', 'Y')], col = j)
+				}
+			# pause()
+		}
+	dev.off()
+
+	## At time of CTD casts
+	for (i in 1:length(id)){
+		dat <- loc[which(loc$ref == id[i]), c('ref', 'D.DATE', 'LQ', 'LON', 'LAT')]; dat.ctd <- ctd.all[which(ctd.all$ref == id[i]), c('ref', 'END.DATE', 'MAX.DBAR', 'LON', 'LAT')] ## Select an individual
+		colnames(dat) <- c('id', 'date', 'lc', 'lon', 'lat'); colnames(dat.ctd) <- c('id', 'date', 'max.dbar', 'lon', 'lat'); dat.ctd <- dat.ctd[order(dat.ctd$date),]
+		dat$date <- as.POSIXct(dat$date)
+		dat$lc <- as.character(dat$lc); dat$lc[which(dat$lc == '-1')] <- 'A'; dat$lc[which(dat$lc == '-2')] <- 'B'; dat$lc[which(dat$lc == '-9')] <- 'Z'
+		dat$lon <- as.numeric(dat$lon); dat$lat <- as.numeric(dat$lat); dat$id <- as.character(dat$id);
+		dat <- dat[which(!is.na(dat$date)),];
+		
+		dat_ssm_rw <- fit_ssm(dat, model = 'crw', time.step = dat.ctd[, 1:2])
+		coords <- st_coordinates(st_transform(dat_ssm_rw$ssm[[1]]$predicted, 4326)); coords.df <- data.frame(dat_ssm_rw$ssm[[1]]$predicted$date, coords); colnames(coords.df)[1] <- 'date'
+	
+		SSMproc <- data.frame(cbind(dat_ssm_rw$ssm[[1]]$predicted[, c('id', 'date')], coords))
+		if (i == 1) {SSMproc.all <- SSMproc} else {SSMproc.all <- rbind(SSMproc.all, SSMproc)}
+	}
+	SSMproc.all$sattag_program <-  sapply(strsplit(as.character(SSMproc.all$id), '-'), '[[', 1); 
+
+	png(file = '~/Work/WIP/NSW_FurSeal/Outcomes/PreliminaryMaps_ArgosVsFoieGras2022locations_CTDdates.png', width = 1920, height = 1920, units = "px", res=92, bg = "white");
+		par(mfrow = c(3, 2), mar = c(4, 4, 1.5, .5))
+		for (i in 1:length(sattag_programs)){
+			loc.sel <- loc[which(loc$sattag_program == sattag_programs[i]),]; SSMproc.all.sel <- SSMproc.all[which(SSMproc.all$sattag_program == sattag_programs[i]),]
+	
+			## Left
+				maps::map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - Argos', sep = ''))
+				for (j in 1:length(unique(loc.sel$ref))){
+					lines(loc.sel[which(loc.sel$ref == unique(loc.sel$ref)[j]), c('LON', 'LAT')], col = j)
+				}
+			## Right			
+				maps::map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - FoieGras', sep = ''))
+				for (j in 1:length(unique(SSMproc.all.sel$id))){
+					lines(SSMproc.all.sel[which(SSMproc.all.sel$id == unique(SSMproc.all.sel$id)[j]), c('X', 'Y')], col = j)
+				}
+			# pause()
+		}
+	dev.off()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+
+
+# ## Before and After foieGras SSM fit
+	# tmp <- fn.vms.dist.to.land(dataIN= loc, LonCol=6, LatCol=5);
+	# loc$DISTkmLAND <- tmp$DISTkmLAND; loc$PointOnLand <- tmp$PointOnLand
+	# loc <- loc[-which(loc$PointOnLand & loc$DISTkmLAND > 10),] ## Remove all points on land, farther than 10 km from the coastline
+
+	
+	png(file = '~/Work/WIP/NSW_FurSeal/Outcomes/PreliminaryMaps_ArgosVsFoieGraslocations_Remove10km.png', width = 1920, height = 1920, units = "px", res=92, bg = "white");
+		par(mfrow = c(3, 2), mar = c(4, 4, 1.5, .5))
+		for (i in 1:length(sattag_programs)){
+			loc.sel <- loc[which(loc$sattag_program == sattag_programs[i]),]; SSMproc.all.sel <- SSMproc.all[which(SSMproc.all$sattag_program == sattag_programs[i]),]
+	
+			## Left
+				map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - Argos', sep = ''))
+				for (j in 1:length(unique(loc.sel$ref))){
+					lines(loc.sel[which(loc.sel$ref == unique(loc.sel$ref)[j]), c('LON', 'LAT')], col = j)
+				}
+			## Right			
+				map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - FoieGras', sep = ''))
+				for (j in 1:length(unique(SSMproc.all.sel$id))){
+					lines(SSMproc.all.sel[which(SSMproc.all.sel$id == unique(SSMproc.all.sel$id)[j]), c('X', 'Y')], col = j)
+				}
+			# pause()
+		}
+	dev.off()
+	
+	png(file = '~/Work/WIP/NSW_FurSeal/Outcomes/PreliminaryMaps_ArgosVsFoieGraslocations.png', width = 1920, height = 1920, units = "px", res=92, bg = "white");
+		par(mfrow = c(3, 2), mar = c(4, 4, 1.5, .5))
+		for (i in 1:length(sattag_programs)){
+			loc.sel <- loc[which(loc$sattag_program == sattag_programs[i]),]; ctd.ssm.sel <- ctd.ssm[which(ctd.ssm$sattag_program == sattag_programs[i]),]
+	
+			## Left
+				map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - Argos', sep = ''))
+				for (j in 1:length(unique(loc.sel$ref))){
+					lines(loc.sel[which(loc.sel$ref == unique(loc.sel$ref)[j]), c('LON', 'LAT')], col = j)
+				}
+			## Right			
+				map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - FoieGras CTD', sep = ''))
+				for (j in 1:length(unique(ctd.ssm.sel$ref))){
+					lines(ctd.ssm.sel[which(ctd.ssm.sel$ref == unique(ctd.ssm.sel$ref)[j]), c('ssm_lon', 'ssm_lat')], col = j)
+				}
+			# pause()
+		}
+	dev.off()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 	
 	
 	
@@ -44,14 +261,7 @@ wgs.84 <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"; mol
 	ct110.ctd.ssm <- read.csv('~/Work/WIP/NSW_FurSeal/Data/FoieGrasProcessedCampaigns/ct110_hist/ctd_ct110_hist.csv')
 
 ## Preprocess datasets for subsequent use
-	## Primary datasets preprocessing
-	loc <- rbind(ct91.loc, ct101.loc, ct110.loc); ctd <- rbind(ct91.ctd, ct101.ctd, ct110.ctd); ctd.ssm <- rbind(ct91.ctd.ssm, ct101.ctd.ssm, ct110.ctd.ssm)
-	loc <- loc[which(loc$LON > 139 & loc$LON < 163 & loc$LAT > -43 & loc$LAT < -30),]; ctd <- ctd[which(ctd$LON > 139 & ctd$LON < 163 & ctd$LAT > -43 & ctd$LAT < -30),]
-	xr <- range(ctd$LON, na.rm = T); yr <- range(ctd$LAT, na.rm = T); expansion <- c(-2, 2);
-	loc$ref <- as.character(loc$ref); ctd$ref <- as.character(ctd$ref); ctd.ssm$ref <- as.character(ctd.ssm$ref)
-	loc$D.DATE <- strptime(as.character(loc$D.DATE), '%m/%d/%y %H:%M:%S', tz = 'UTC'); ctd$END.DATE <- strptime(as.character(ctd$END.DATE), '%m/%d/%y %H:%M:%S', tz = 'UTC'); 
-	loc$sattag_program <- sapply(strsplit(loc$ref, '-'), '[[', 1); ctd$sattag_program <- sapply(strsplit(ctd$ref, '-'), '[[', 1); ctd.ssm$sattag_program <- sapply(strsplit(ctd.ssm$ref, '-'), '[[', 1); 
-	sattag_programs <- unique(loc$sattag_program)
+
 	
 	## Bathymetry dataset preprocessing
 	# lon<- ncvar_get(bathymetry,'x_range')[1]; lat<- ncvar_get(bathymetry,'y_range')[2]; depth<- ncvar_get(bathymetry,'z')
@@ -196,65 +406,6 @@ dev.off()
 	dev.off()
 
 
-## Before and After foieGras SSM fit
-	tmp <- fn.vms.dist.to.land(dataIN= loc, LonCol=6, LatCol=5);
-	loc$DISTkmLAND <- tmp$DISTkmLAND; loc$PointOnLand <- tmp$PointOnLand
-	loc <- loc[-which(loc$PointOnLand & loc$DISTkmLAND > 10),] ## Remove all points on land, farther than 10 km from the coastline
-	for (i in 1:length(id)){
-		dat <- loc[which(loc$ref == id[i]), c('ref', 'D.DATE', 'LQ', 'LON', 'LAT')] ## Select an individual
-		colnames(dat) <- c('id', 'date', 'lc', 'lon', 'lat')
-		dat$date <- as.POSIXct(dat$date)
-		dat$lc <- as.character(dat$lc); dat$lc[which(dat$lc == '-1')] <- 'A'; dat$lc[which(dat$lc == '-2')] <- 'B'; dat$lc[which(dat$lc == '-9')] <- 'Z'
-		dat$lon <- as.numeric(dat$lon); dat$lat <- as.numeric(dat$lat); dat$id <- as.character(dat$id);
-		dat <- dat[which(!is.na(dat$date)),];
-		
-		dat_ssm_rw <- fit_ssm(dat, model = 'crw', time.step = 6)
-		# plot(dat_ssm_rw$ssm[[1]])
-		coords <- st_coordinates(st_transform(dat_ssm_rw$ssm[[1]]$predicted, 4326));
-		coords.df <- data.frame(dat_ssm_rw$ssm[[1]]$predicted$date, coords); colnames(coords.df)[1] <- 'date'
-	
-		SSMproc <- data.frame(cbind(dat_ssm_rw$ssm[[1]]$predicted[, c('id', 'date')], coords))
-		if (i == 1) {SSMproc.all <- SSMproc} else {SSMproc.all <- rbind(SSMproc.all, SSMproc)}
-	}
-	SSMproc.all$sattag_program <-  sapply(strsplit(as.character(SSMproc.all$id), '-'), '[[', 1); 
-	
-	png(file = '~/Work/WIP/NSW_FurSeal/Outcomes/PreliminaryMaps_ArgosVsFoieGraslocations_Remove10km.png', width = 1920, height = 1920, units = "px", res=92, bg = "white");
-		par(mfrow = c(3, 2), mar = c(4, 4, 1.5, .5))
-		for (i in 1:length(sattag_programs)){
-			loc.sel <- loc[which(loc$sattag_program == sattag_programs[i]),]; SSMproc.all.sel <- SSMproc.all[which(SSMproc.all$sattag_program == sattag_programs[i]),]
-	
-			## Left
-				map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - Argos', sep = ''))
-				for (j in 1:length(unique(loc.sel$ref))){
-					lines(loc.sel[which(loc.sel$ref == unique(loc.sel$ref)[j]), c('LON', 'LAT')], col = j)
-				}
-			## Right			
-				map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - FoieGras', sep = ''))
-				for (j in 1:length(unique(SSMproc.all.sel$id))){
-					lines(SSMproc.all.sel[which(SSMproc.all.sel$id == unique(SSMproc.all.sel$id)[j]), c('X', 'Y')], col = j)
-				}
-			# pause()
-		}
-	dev.off()
-	
-	png(file = '~/Work/WIP/NSW_FurSeal/Outcomes/PreliminaryMaps_ArgosVsFoieGraslocations.png', width = 1920, height = 1920, units = "px", res=92, bg = "white");
-		par(mfrow = c(3, 2), mar = c(4, 4, 1.5, .5))
-		for (i in 1:length(sattag_programs)){
-			loc.sel <- loc[which(loc$sattag_program == sattag_programs[i]),]; ctd.ssm.sel <- ctd.ssm[which(ctd.ssm$sattag_program == sattag_programs[i]),]
-	
-			## Left
-				map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - Argos', sep = ''))
-				for (j in 1:length(unique(loc.sel$ref))){
-					lines(loc.sel[which(loc.sel$ref == unique(loc.sel$ref)[j]), c('LON', 'LAT')], col = j)
-				}
-			## Right			
-				map('worldHires', fill = T, col = 'grey', xlim = xr + expansion, ylim = yr + expansion); map.axes(); title(main = paste(sattag_programs[i], ' - FoieGras CTD', sep = ''))
-				for (j in 1:length(unique(ctd.ssm.sel$ref))){
-					lines(ctd.ssm.sel[which(ctd.ssm.sel$ref == unique(ctd.ssm.sel$ref)[j]), c('ssm_lon', 'ssm_lat')], col = j)
-				}
-			# pause()
-		}
-	dev.off()
 
 
 ## TS plots ODV for animals having ventured far offshore through ODV? Or through my R script developed for Antarctica?
