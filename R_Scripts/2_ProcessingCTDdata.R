@@ -5,42 +5,64 @@ rm(list=ls());
 
 ####################################
 ## Load up config file and libraries
-	Packages <- c('gsw', 'oce')
+	Packages <- c('gsw', 'oce', 'rLakeAnalyzer')
 	pacman::p_load(Packages, character.only = TRUE);
 
-## Read location and CTD datasets, along with metadata
+	## Read location and CTD datasets, along with deployment metadata
 	load("~/Work/WIP/NSW_FurSeal/Data/1_ArgosCTD_SSM.Rdata")
 	metadata <- read.csv('~/Work/WIP/NSW_FurSeal/Data/NSW_FurSeal_TagMetadata.csv')
 	metadata$mass <- ifelse(is.na(metadata$estimated_mass), metadata$actual_mass, metadata$estimated_mass)
 	
 
-#################################################		
-## Extract temperature, salinity and depth values
-	ctd.all <- ctd.all[which(ctd.all$TEMP.DBAR != '' & !is.na(ctd.all$END.DATE)),]; id <- unique(ctd.all$ref); # ctd.all.backup <- ctd.all
+#########################################################
+## Extract temperature, salinity and depth values - START
+	id <- unique(ctd.all$ref); # ctd.all.backup <- ctd.all
 	for (j in 1:length(id)){
 		ctd <- ctd.all[which(ctd.all$ref == id[j]),]
-		x <- as.numeric(ctd$LON) # Longitude
-		y <- as.numeric(ctd$LAT) # Latitude
+		x <- as.numeric(ctd$X) # Longitude
+		y <- as.numeric(ctd$Y) # Latitude
 		date <- ctd$END.DATE
+		DISTkm <- ctd$DISTkm; DISTkmLAND <- ctd$DISTkmLAND; DEPTH_M <- ctd$DEPTH_M
 		temp <- psal <- dbar <- NA
 		for (s in 1:length(x)){
 			prof_id <- rep(s, length = length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))
+			uprof_id <- rep(rownames(ctd)[s], length = length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))
 			lon <- rep(x[s], length = length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))
 			lat <- rep(y[s], length = length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))
 			datetime <- rep(date[s], length = length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))
+			distkm <- rep(DISTkm[s], length = length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))
+			distkmland <- rep(DISTkmLAND[s], length = length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))
+			depthm <- rep(DEPTH_M[s], length = length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))
 			temp <- as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]]) # SST	
 			if (ctd$SAL.CORRECTED.VALS[s] == '') {psal <- rep(NA, length(as.numeric(strsplit(as.character(ctd$TEMP.VALS[s]), ',')[[1]])))} else {
 				psal <- as.numeric(strsplit(as.character(ctd$SAL.CORRECTED.VALS[s]), ',')[[1]])} # PSAL
 			dbar <- as.numeric(strsplit(as.character(ctd$TEMP.DBAR[s]), ',')[[1]]) # SST
 			if(length(temp) != length(psal)) {print(s); break}
-			if(s == 1) {prof_id.all <- prof_id; lon.all <- lon; lat.all <- lat; date.all <- datetime; temp.all <- temp; psal.all = psal; dbar.all = dbar} else 
-				if (s > 1)  {prof_id.all <- c(prof_id.all, prof_id); lon.all <- c(lon.all, lon); lat.all <- c(lat.all, lat); date.all <- c(date.all, datetime); temp.all <- c(temp.all, temp); psal.all = c(psal.all, psal); dbar.all = c(dbar.all, dbar)}
+			if(s == 1) {prof_id.all <- prof_id; uprof_id.all <- uprof_id; lon.all <- lon; lat.all <- lat; date.all <- datetime; distkm.all <- distkm; distkmland.all <- distkmland; depthm.all <- depthm; temp.all <- temp; psal.all = psal; dbar.all = dbar} else 
+				if (s > 1)  {prof_id.all <- c(prof_id.all, prof_id); uprof_id.all <- c(uprof_id.all, uprof_id); lon.all <- c(lon.all, lon); lat.all <- c(lat.all, lat); date.all <- c(date.all, datetime); 
+								distkm.all <- c(distkm.all, distkm); distkmland.all <- c(distkmland.all, distkmland); depthm.all <- c(depthm.all, depthm); 
+								temp.all <- c(temp.all, temp); psal.all = c(psal.all, psal); dbar.all = c(dbar.all, dbar)}
 		}
-		CTD <- data.frame(ref = rep(id[j], length(temp.all)), profile_id = prof_id.all, LON = lon.all, LAT = lat.all, DATE = date.all, TEMP = temp.all, PSAL = psal.all, DBAR = dbar.all)
+		CTD <- data.frame(ref = rep(id[j], length(temp.all)), unique_profile_id = uprof_id.all, profile_id = prof_id.all, LON = lon.all, LAT = lat.all, DATE = date.all, TEMP = temp.all, PSAL = psal.all, DBAR = dbar.all, 
+							DISTkm = distkm.all, DISTkmLAND = distkmland.all, DEPTH_M = depthm.all)
 		if (j == 1) {CTD.ALL <- CTD} else {CTD.ALL <- rbind(CTD.ALL, CTD)}
 	}
 	CTD.ALL$sattag_program <- sapply(strsplit(as.character(CTD.ALL$ref), '-'), '[[', 1);  CTD.ALL$DayOfYear <- as.numeric(format(CTD.ALL$DATE, '%j'))
-	
+## Extract temperature, salinity and depth values - END
+#######################################################
+
+
+##################################################
+## Remove dubious profiles, ad-hoc process - START
+	id2 <- 'ct110-255-12'
+	test <- subset(CTD.ALL, ref == id2); 
+		test[which(test$PSAL < 35.2),]; # test[which(test$TEMP < 10),]
+		test[which(test$unique_profile_id %in% c(9948)),]
+	ProfToFilterOut <- c(651, 652, 1029, 1103, 1613, 874, 3999, 4123, 4366, 4421, 4962, 5011, 8771, 8927, 9225, 9351, 9360, 5216, 6130, 6642, 6644, 6711, 6865, 6867, 10784, 10853, 10859, 10874, 10648, 10077, 10220, 9448, 11165)
+	CTD.ALL <- CTD.ALL[-which(CTD.ALL$unique_profile_id %in% ProfToFilterOut),] ## Removing 33 profiles manually
+## Remove dubious profiles, ad-hoc process - END
+################################################
+
 	
 ###################
 ## Produce TS plots
@@ -102,7 +124,7 @@ for (i in 1:length(id)){
 	temperature <- temperature[order(distance),]; salinity <- salinity[order(distance),];
 	distance <- distance[order(distance)];
 	
-	png(paste0('~/Work/WIP/NSW_FurSeal/Outcomes/CTD/', id[i], 'TSsectionsLongitude.png'), width = 4000, height = 2400, units = 'px', res = 300)
+	png(paste0('~/Work/WIP/NSW_FurSeal/Outcomes/CTD/', id[i], '_TSsectionsLongitude.png'), width = 4000, height = 2400, units = 'px', res = 300)
 		split.screen(c(2,2))
 		screen(1)
 		plot(GSg, which = 'temperature', xtype = 'longitude', ztype = 'image', xlab = 'Longitude')
